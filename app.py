@@ -5,7 +5,7 @@ from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-key")
-DB_NAME = "/var/data/users.db"
+DB_NAME = "/tmp/users.db"
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -100,4 +100,5 @@ init_db()
 if __name__ == "__main__":
    
     app.run(debug=True)
+
 
