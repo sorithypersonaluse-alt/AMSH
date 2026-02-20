@@ -1,11 +1,14 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 import sqlite3
 import os
 from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-key")
-DB_NAME = "/tmp/users.db"
+
+# Local PC: keep "users.db"
+# Render Free: change to "/tmp/users.db" so it can write
+DB_NAME = os.environ.get("DB_NAME", "users.db")
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -15,7 +18,8 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    # password stored as TEXT (plain)
+
+    # users table (plain text password as you requested)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,6 +28,25 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # room state table for your room control page
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS room_state (
+            room_id INTEGER PRIMARY KEY,
+            l1 INTEGER DEFAULT 0,
+            l2 INTEGER DEFAULT 0,
+            l3 INTEGER DEFAULT 0,
+            l4 INTEGER DEFAULT 0,
+            projector INTEGER DEFAULT 0,
+            ac INTEGER DEFAULT 0,
+            temperature INTEGER DEFAULT 16,
+            swing_v INTEGER DEFAULT 0,
+            swing_h INTEGER DEFAULT 0,
+            fan_speed INTEGER DEFAULT 1,
+            mode TEXT DEFAULT 'cool'
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -52,8 +75,7 @@ def register():
         try:
             conn = get_db()
             cur = conn.cursor()
-            cur.execute("INSERT INTO users (username, password) VALUES (?, ?)",
-                        (username, password))   # storing plain text
+            cur.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
             conn.commit()
             conn.close()
             flash("Registered. Please log in.")
@@ -76,7 +98,6 @@ def login():
         user = cur.fetchone()
         conn.close()
 
-        # plain text compare
         if user and user["password"] == password:
             session["user_id"] = user["id"]
             session["username"] = user["username"]
@@ -87,18 +108,108 @@ def login():
 
     return render_template("login.html")
 
+# ========= AFTER LOGIN: rooms list =========
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    return render_template("dashboard.html", username=session.get("username"))
+    rooms = [{"id": i, "name": f"Room {i}"} for i in range(1, 10)]
+    return render_template("rooms.html", rooms=rooms, username=session.get("username"))
+
+# ========= room control page =========
+@app.route("/room/<int:room_id>")
+@login_required
+def room(room_id):
+    conn = get_db()
+    cur = conn.cursor()
+
+    # ensure row exists
+    cur.execute("INSERT OR IGNORE INTO room_state (room_id) VALUES (?)", (room_id,))
+    conn.commit()
+
+    cur.execute("SELECT * FROM room_state WHERE room_id = ?", (room_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    state = dict(row) if row else {
+        "room_id": room_id,
+        "l1":0,"l2":0,"l3":0,"l4":0,
+        "projector":0,"ac":0,
+        "temperature":16,"swing_v":0,"swing_h":0,
+        "fan_speed":1,"mode":"cool"
+    }
+
+    kwh_labels = list(range(1, 13))
+    kwh_values = [42, 48, 53, 58, 45, 55, 40, 22, 44, 60, 48, 70]
+
+    return render_template(
+        "room.html",
+        room_id=room_id,
+        state=state,
+        kwh_labels=kwh_labels,
+        kwh_values=kwh_values
+    )
+
+
+# ========= APIs for buttons =========
+@app.post("/api/room/<int:room_id>/toggle")
+@login_required
+def toggle_device(room_id):
+    data = request.get_json(force=True)
+    device = data.get("device")
+
+    allowed = {"l1","l2","l3","l4","projector","ac","swing_v","swing_h"}
+    if device not in allowed:
+        return jsonify({"ok": False, "error": "Invalid device"}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO room_state (room_id) VALUES (?)", (room_id,))
+    cur.execute(
+        f"UPDATE room_state SET {device} = CASE {device} WHEN 1 THEN 0 ELSE 1 END WHERE room_id = ?",
+        (room_id,)
+    )
+    conn.commit()
+    cur.execute("SELECT * FROM room_state WHERE room_id = ?", (room_id,))
+    state = dict(cur.fetchone())
+    conn.close()
+    return jsonify({"ok": True, "state": state})
+
+@app.post("/api/room/<int:room_id>/ac")
+@login_required
+def update_ac(room_id):
+    data = request.get_json(force=True)
+
+    temp = int(data.get("temperature", 16))
+    temp = max(16, min(30, temp))
+
+    fan_speed = int(data.get("fan_speed", 1))
+    fan_speed = max(1, min(5, fan_speed))
+
+    mode = data.get("mode", "cool")
+    if mode not in {"cool", "auto", "dry", "fan"}:
+        mode = "cool"
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO room_state (room_id) VALUES (?)", (room_id,))
+    cur.execute("""
+        UPDATE room_state
+        SET temperature=?, fan_speed=?, mode=?
+        WHERE room_id=?
+    """, (temp, fan_speed, mode, room_id))
+    conn.commit()
+    cur.execute("SELECT * FROM room_state WHERE room_id = ?", (room_id,))
+    state = dict(cur.fetchone())
+    conn.close()
+    return jsonify({"ok": True, "state": state})
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+# Run DB init even with waitress
 init_db()
+
 if __name__ == "__main__":
-   
     app.run(debug=True)
-
-
